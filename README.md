@@ -1,5 +1,4 @@
-# Attending to the Core: Main-Task-Centric Target Learning via Core-Task Attention in Recommendation
-
+# Attending to the Core: Core-Task Attention for Recommendation
 ## Setup the Environment
 
 We recommend using Python 3.8+.Run the following commands to install dependencies:
@@ -14,15 +13,18 @@ Our approach is based on the DeepCTR framework. Run
 
 to obtain the DeepCTR source code, and organize the code as follows:
 
+```
 DeepCTR/
 ├── deepctr/
-│└──  models/
-│ │ └── multitask
-│ │   │ └── coreatt_kuaisar.py
+│   └── models/
+│       └── multitask/
+│           └── coreatt_kuaisar.py
 ├── data/
-│ └── KuaiSar
+│   └── KuaiSar/
 ├── coreatt_kuaisar.py
 └── README.md
+```
+
 
 ## Run Example
 
