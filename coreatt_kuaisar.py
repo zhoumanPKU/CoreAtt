@@ -1,4 +1,3 @@
-#############说明：这个模型改动在于使用更常见的自注意力机制
 from tensorflow.python.keras.models import Model
 from tensorflow.python.keras.layers import Dense
 
@@ -28,105 +27,100 @@ def ple(inputs, boundaries):
     return outputs
 
 class InformationFusionUnit(Layer):
-    """信息融合单元 - 使用注意力机制融合多任务信息"""
-    def __init__(self, hidden_dim, conc=0,T=1.0,noV=0,**kwargs):
+    def __init__(self, hidden_dim, conc=0, T=1.0, noV=0, **kwargs):
         super(InformationFusionUnit, self).__init__(**kwargs)
         self.hidden_dim = hidden_dim
         self.attention_weights = None
-        self.conc=conc
-        self.T=T
-        self.noV=noV
+        self.target_attention_weights = None
+        self.conc = conc
+        self.T = T
+        self.noV = noV
+
     def build(self, input_shape):
-        self.h1 = DNN([self.hidden_dim], activation='linear')
-        self.h2 = DNN([self.hidden_dim], activation='linear')
-        self.h3 = DNN([self.hidden_dim], activation='linear')
+
+        self.sa_q = DNN([self.hidden_dim], activation='linear')
+        self.sa_k = DNN([self.hidden_dim], activation='linear')
+        self.sa_v = DNN([self.hidden_dim], activation='linear')
+
+        self.ta_q = DNN([self.hidden_dim], activation='linear')
+        self.ta_k = DNN([self.hidden_dim], activation='linear')
+        self.ta_v = DNN([self.hidden_dim], activation='linear')
+
+        self.fusion_proj = DNN([self.hidden_dim], activation='linear')
         super(InformationFusionUnit, self).build(input_shape)
-        
+
     def call(self, inputs, **kwargs):
-        # inputs是一个列表，包含来自不同任务的信息，有0个/1个/2个32维向量
-        # 计算注意力权重
-        if len(inputs)==0:
+
+        if len(inputs) == 0:
             return tf.zeros(self.hidden_dim)
-        # 将输入列表转换为张量 (batch_size, num_inputs, input_dim)
+
+
         inputs_tensor = tf.stack(inputs, axis=1)
-        batch_size = tf.shape(inputs_tensor)[0]
-        num_inputs = tf.shape(inputs_tensor)[1]
-        
-        # 应用Q、K、V变换
-        Q = self.h1(inputs_tensor)  # (batch_size, num_inputs, hidden_dim)
-        K = self.h2(inputs_tensor)    # (batch_size, num_inputs, hidden_dim)
-        V = self.h3(inputs_tensor)  # (batch_size, num_inputs, hidden_dim)
-        if self.noV==1:
-            V=inputs_tensor
-        #V = inputs_tensor
-        
-        # 计算注意力分数: Q * K^T
-        attention_scores = tf.matmul(Q, K, transpose_b=True)  # (batch_size, num_inputs, num_inputs)
-        
-        # 缩放注意力分数
-        dk = tf.cast(tf.shape(K)[-1], tf.float32)
-        
-        attention_scores = attention_scores / tf.math.sqrt(dk)
-        
-        # 应用softmax获取注意力权重
-        temper=self.T
-        self.attention_weights = tf.nn.softmax((attention_scores)/temper, axis=-1)
-        
-        #self.attention_weights = tf.nn.softmax(attention_scores, axis=-1)  # (batch_size, num_inputs, num_inputs)
-        
-        # 加权求和: 注意力权重 * V
-        fused_output = tf.matmul(self.attention_weights, V)  # (batch_size, num_inputs, hidden_dim)
-        
-        
-        fused_output = tf.reduce_mean(fused_output, axis=1)  # (batch_size, hidden_dim)
 
 
+        SA_Q = self.sa_q(inputs_tensor)  # (batch, num_inputs, hidden_dim)
+        SA_K = self.sa_k(inputs_tensor)  # (batch, num_inputs, hidden_dim)
+        SA_V = self.sa_v(inputs_tensor) if self.noV == 0 else inputs_tensor
+
+        sa_scores = tf.matmul(SA_Q, SA_K, transpose_b=True)  # (batch, num_inputs, num_inputs)
+        dk = tf.cast(tf.shape(SA_K)[-1], tf.float32)
+        sa_scores = sa_scores / tf.math.sqrt(dk)
+        self.attention_weights = tf.nn.softmax(sa_scores / self.T, axis=-1)
+        sa_out = tf.matmul(self.attention_weights, SA_V)       # (batch, num_inputs, hidden_dim)
+        sa_out = tf.reduce_mean(sa_out, axis=1)                # (batch, hidden_dim)
+
+
+        # target: (batch, 1, input_dim)
+        target = tf.expand_dims(inputs[-1], axis=1)
+
+        TA_Q = self.ta_q(target)         # (batch, 1, hidden_dim)
+        TA_K = self.ta_k(inputs_tensor)  # (batch, num_inputs, hidden_dim)
+        TA_V = self.ta_v(inputs_tensor) if self.noV == 0 else inputs_tensor
+
+        ta_scores = tf.matmul(TA_Q, TA_K, transpose_b=True)  # (batch, 1, num_inputs)
+        dk_t = tf.cast(tf.shape(TA_K)[-1], tf.float32)
+        ta_scores = ta_scores / tf.math.sqrt(dk_t)
+        self.target_attention_weights = tf.nn.softmax(ta_scores / self.T, axis=-1)
+        ta_out = tf.matmul(self.target_attention_weights, TA_V)  # (batch, 1, hidden_dim)
+        ta_out = tf.squeeze(ta_out, axis=1)                      # (batch, hidden_dim)
+
+
+        combined = sa_out + ta_out                     # (batch, hidden_dim)
+        fused_output = self.fusion_proj(combined)      # (batch, hidden_dim)
 
         return fused_output
+
     def get_attention_weights(self):
-        """获取注意力权重张量"""
         return self.attention_weights
+
+    def get_target_attention_weights(self):
+        return self.target_attention_weights
+
+
 class SigmoidParamLayer(tf.keras.layers.Layer):
     def __init__(self):
         super().__init__()
-        # 先创建无约束的变量（初始值可以是任意实数）
+
         self.raw_param = self.add_weight(
             shape=(),
-            initializer=tf.random_normal_initializer(mean=0.0, stddev=0.5),  # 初始值围绕0
+            initializer=tf.random_normal_initializer(mean=0.0, stddev=0.5),  
             trainable=True,
             name="raw_param"
         )
 
     @property
     def zero_one_param(self):
-        # 用sigmoid映射到(0,1)（可学习参数的实际取值）
+
         return tf.sigmoid(self.raw_param)
 
     def call(self, inputs):
-        output = inputs * self.zero_one_param  # 使用映射后的0-1参数
+        output = inputs * self.zero_one_param 
         return output
 
 
 def mymodel4(dnn_feature_columns, bottom_dnn_hidden_units=(256, 128), tower_dnn_hidden_units=(64,),
                  l2_reg_embedding=0.00001, l2_reg_dnn=0, seed=1024, dnn_dropout=0, dnn_activation='relu',
                  dnn_use_bn=False, task_types=('binary', 'binary'), task_names=('ctr', 'ctcvr'),tasktype=0,ifu_hidden_dim=32):
-    """Instantiates the SharedBottom multi-task learning Network architecture.
-
-    :param dnn_feature_columns: An iterable containing all the features used by deep part of the model.
-    :param bottom_dnn_hidden_units: list,list of positive integer or empty list, the layer number and units in each layer of shared bottom DNN.
-    :param tower_dnn_hidden_units: list,list of positive integer or empty list, the layer number and units in each layer of task-specific DNN.
-    :param l2_reg_embedding: float. L2 regularizer strength applied to embedding vector
-    :param l2_reg_dnn: float. L2 regularizer strength applied to DNN
-    :param seed: integer ,to use as random seed.
-    :param dnn_dropout: float in [0,1), the probability we will drop out a given DNN coordinate.
-    :param dnn_activation: Activation function to use in DNN
-    :param dnn_use_bn: bool. Whether use BatchNormalization before activation or not in DNN
-    :param task_types: list of str, indicating the loss of each tasks, ``"binary"`` for  binary logloss or  ``"regression"`` for regression loss. e.g. ['binary', 'regression']
-    :param task_names: list of str, indicating the predict target of each tasks
-
-    :return: A Keras model instance.
-    """
-
 
 
     num_tasks = len(task_names)
@@ -183,7 +177,7 @@ def mymodel4(dnn_feature_columns, bottom_dnn_hidden_units=(256, 128), tower_dnn_
             fused_output = ifu(t_output)
             # if i!=0 and i!=2 and i!=3:
             if i==num_tasks-1:
-                #最后一个目标
+
                 sbtemp=Concatenate()([sbtemp,(1-sigmoid_layers[i].zero_one_param)*fused_output+sigmoid_layers[i].zero_one_param*(tf.reduce_mean(t_output2, axis=0))])
             tower_output = DNN(tower_dnn_hidden_units, dnn_activation, l2_reg_dnn, dnn_dropout, dnn_use_bn, seed=seed,
                            name='tower_' + task_name)(sbtemp)
@@ -198,9 +192,9 @@ def mymodel4(dnn_feature_columns, bottom_dnn_hidden_units=(256, 128), tower_dnn_
             if i<num_tasks-2:
                 # le=ple(output_nog,boundary[i]) 
                 le=ple(output_nog,boundary_maps[task_name])
-                batch_sums = tf.reduce_sum(le, axis=1)  # 结果形状：[batch_size]
+                batch_sums = tf.reduce_sum(le, axis=1)  
 
-                # 第二步：增加一个维度，将形状转换为[batch_size, 1]
+
                 w = tf.expand_dims(batch_sums, axis=1)
                 w=w/20
                 t_output2.append((1+w)*tf.stop_gradient(tower_output))#(1-output_nog)*
